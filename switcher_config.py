@@ -1,6 +1,5 @@
 # A script to login to AWS accounts and update AWS creds whithout requiring to copy/paste from Control Tower SSO page
 
-from email.policy import default
 import aws_sso_lib
 import boto3
 import configparser
