@@ -189,7 +189,6 @@ def main(update, aws_config, sso_start_url, sso_region, region):
         print(aws_config, sso_start_url, sso_region, region)
         update_aws_config(aws_config, sso_start_url, sso_region, region)
     accounts = read_aws_config()
-    print(accounts)
     accounts_formatted = [
         (sso_account_id, account["profile_name"], account["sso_role_name"])
         for sso_account_id, account in accounts.items()
