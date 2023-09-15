@@ -8,6 +8,7 @@ from InquirerPy import prompt
 import os
 from typing import Tuple
 import click
+import re
 
 
 def login(start_url: str, sso_region: str) -> dict:
@@ -87,9 +88,9 @@ def choose_account_role(accounts: list) -> dict:
     Returns:
         dict: { 'account_id': account_id, 'role_name': role_name }
     """
-    longets_name_len = max([len(acc[1]) for acc in accounts])
+    longest_name_len = max([len(acc[1]) for acc in accounts])
     account_choices = [
-        f"{acc[1]} {' '*(longets_name_len - len(acc[1]))} {acc[0]} {acc[2]}"
+        f"{acc[1]} {' '*(longest_name_len - len(acc[1]))} {acc[0]} {acc[2]}"
         for acc in accounts
     ]
     questions = [
@@ -103,30 +104,40 @@ def choose_account_role(accounts: list) -> dict:
     ]
     answers = prompt(questions)
 
+    account_name = re.search(r"^.*?(?=\b\d{12}\b)", answers["user_option"]).group(), # get account name
+    account_id = re.search(r"\b\d{12}\b", answers["user_option"]).group(), # 12 digits, to get aws account id
+    role_name = re.search(r"\b\w+\b$", answers["user_option"]).group(), # last word, to get role name
+
     return {
-        "account_id": answers["user_option"].split()[1],
-        "role_name": answers["user_option"].split()[2],
+        "account_name": account_name[0].strip(),
+        "account_id": account_id[0].strip(),
+        "role_name": role_name[0].strip(),
     }
 
 
-def read_aws_config(aws_config: str = "~/.aws/config"):
+def read_aws_config(aws_config: str = "~/.aws/config") -> dict:
     accounts = {}
     config = configparser.ConfigParser()
     config.read_file(open(os.path.expanduser(aws_config)))
     for section in config.sections():
-        if (
-            config.has_option(section, "sso_start_url")
-            & config.has_option(section, "sso_region")
-            & config.has_option(section, "sso_account_id")
-            & config.has_option(section, "sso_role_name")
-            & config.has_option(section, "region")
+        if all(
+            config.has_option(section, option)
+            for option in [
+                "sso_start_url",
+                "sso_region",
+                "sso_account_id",
+                "sso_role_name",
+                "region",
+            ]
         ):
-            accounts[config[section]["sso_account_id"]] = {
+            profile_name = section.split(' ', 1)[1]
+            accounts[profile_name] = {
                 "sso_start_url": config[section]["sso_start_url"],
                 "sso_region": config[section]["sso_region"],
+                "sso_account_id": config[section]["sso_account_id"],
                 "sso_role_name": config[section]["sso_role_name"],
                 "region": config[section]["region"],
-                "profile_name": config[section].name.split(' ', 1)[1],
+                "profile_name": profile_name,
             }
     return accounts
 
@@ -143,7 +154,7 @@ def update_aws_config(
     config = configparser.ConfigParser()
     config.read_file(open(os.path.expanduser(aws_config)))
     for account, account_name, role_name in accounts:
-        section = f"profile {account_name}"
+        section = f"profile {account_name} {role_name[:7]}"
         if not config.has_section(section):
             config.add_section(section)
             config.set(section, "sso_start_url", sso_start_url)
@@ -182,6 +193,8 @@ def update_aws_config(
     default="us-east-1",
     help="AWS Region to send requests to for commands requested using this profile. Default 'us-east-1'",
 )
+
+
 def main(update, aws_config, sso_start_url, sso_region, region):
     if update:
         if not sso_start_url:
@@ -190,16 +203,17 @@ def main(update, aws_config, sso_start_url, sso_region, region):
         update_aws_config(aws_config, sso_start_url, sso_region, region)
     accounts = read_aws_config()
     accounts_formatted = [
-        (sso_account_id, account["profile_name"], account["sso_role_name"])
-        for sso_account_id, account in accounts.items()
+        (account["sso_account_id"], account["profile_name"], account["sso_role_name"])
+        for account in accounts.values()
     ]
     account_role = choose_account_role(accounts_formatted)
-    account_id, role_name = account_role["account_id"], account_role["role_name"]
-    print("account_id: ", account_id)
-    print("role_name: ", role_name)
+    account_name, account_id, role_name = account_role["account_name"], account_role["account_id"], account_role["role_name"]
+    print(f"profile_name: {account_name}")
+    print(f"account_id:   {account_id}")
+    print(f"role_name:    {role_name}")
     session = login(
-        start_url=accounts[account_id]["sso_start_url"],
-        sso_region=accounts[account_id]["sso_region"],
+        start_url=accounts[account_name]["sso_start_url"],
+        sso_region=accounts[account_name]["sso_region"],
     )
     role_credentials = get_role_credentials(
         accessToken=session["accessToken"], account_id=account_id, role_name=role_name
