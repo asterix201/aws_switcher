@@ -222,3 +222,4 @@ def main(update, aws_config, sso_start_url, sso_region, region):
 
 if __name__ == "__main__":
     main()
+    
