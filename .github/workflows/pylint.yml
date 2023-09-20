@@ -6,7 +6,6 @@ on:
       - master
       - develop
       - '*'
-    # Run only if the commit message contains "run ci"
     if: "contains(github.event.head_commit.message, 'run ci') && (github.ref == 'refs/heads/' + github.event.head_commit.branch)"
 
 jobs:
