@@ -83,13 +83,15 @@ def choose_account_role(accounts: list) -> dict:
 
     Args:
         accounts (list): List of account in tuples in format [(account_id, account_name, role_name)].
+        [(sso_account_id,  profile_name, sso_role_name)]
 
     Returns:
         dict: { 'account_id': account_id, 'role_name': role_name }
     """
     longest_name_len = max([len(acc[1]) for acc in accounts])
+    longest_role_len = max([len(acc[2]) for acc in accounts])
     account_choices = [
-        f"{acc[1]} {' '*(longest_name_len - len(acc[1]))} {acc[0]} {acc[2]}"
+        f"{acc[1]} {' '*(longest_name_len - len(acc[1]))} {acc[2]} {' '*(longest_role_len - len(acc[2]))} {acc[0]}"
         for acc in accounts
     ]
     questions = [
@@ -103,19 +105,27 @@ def choose_account_role(accounts: list) -> dict:
     ]
     answers = prompt(questions)
 
-    account_name = re.search(r"^.*?(?=\b\d{12}\b)", answers["user_option"]).group(), # get account name
-    account_id = re.search(r"\b\d{12}\b", answers["user_option"]).group(), # 12 digits, to get aws account id
-    role_name = re.search(r"\b\w+\b$", answers["user_option"]).group(), # last word, to get role name
+    account_name = answers["user_option"].split()[:-2] # get list of words, except last two - profile account name
+    account_id = answers["user_option"].split()[-1] # last word, to get aws account id
+    role_name = answers["user_option"].split()[-2] # get role name
 
     return {
-        "account_name": account_name[0].strip(),
-        "account_id": account_id[0].strip(),
-        "role_name": role_name[0].strip(),
+        "account_name": " ".join(account_name).strip(),
+        "account_id": account_id.strip(),
+        "role_name": role_name.strip(),
     }
 
 
-def read_aws_config(aws_config: str = "~/.aws/config") -> dict:
-    accounts = {}
+def read_aws_config(aws_config: str = "~/.aws/config") -> list:
+    """Read aws config file and return a list of accounts
+
+    Args:
+        aws_config (str, optional): path to aws config file. Defaults to "~/.aws/config".
+
+    Returns:
+        list: List of accounts in format
+    """
+    accounts = []
     config = configparser.ConfigParser()
     config.read_file(open(os.path.expanduser(aws_config)))
     for section in config.sections():
@@ -130,20 +140,28 @@ def read_aws_config(aws_config: str = "~/.aws/config") -> dict:
             ]
         ):
             profile_name = section.split(' ', 1)[1]
-            accounts[profile_name] = {
+            accounts.append({
                 "sso_start_url": config[section]["sso_start_url"],
                 "sso_region": config[section]["sso_region"],
                 "sso_account_id": config[section]["sso_account_id"],
                 "sso_role_name": config[section]["sso_role_name"],
                 "region": config[section]["region"],
                 "profile_name": profile_name,
-            }
+            })
     return accounts
 
 
 def update_aws_config(
     aws_config: str, sso_start_url: str, sso_region: str, region: str
 ):
+    """Update aws config file with accessible accounts/roles
+
+    Args:
+        aws_config (str): path to aws config file. 
+        sso_start_url (str): URL that points to the organization's AWS SSO user portal.
+        sso_region (str): The AWS Region that contains the AWS SSO portal host.
+        region (str): AWS Region to send requests to for commands requested using this profile.
+    """
     accounts = [
         account
         for account in aws_sso_lib.list_available_roles(
@@ -164,6 +182,22 @@ def update_aws_config(
             config.set(section, "output", "text")
     with open(os.path.expanduser(aws_config), "w") as config_file:
         config.write(config_file)
+
+
+def check_aws_config(aws_config: str = "~/.aws/config"):
+    """Check if aws config file is exist and has required permissions. Create aws_config file if not exist.
+
+    Args:
+        aws_config (str, optional): path to aws config file. Defaults to "~/.aws/config".
+    """
+    if not os.path.exists(os.path.expanduser(aws_config)):
+        # check and create folders path to aws config file
+        if not os.path.exists(os.path.dirname(os.path.expanduser(aws_config))):
+            os.makedirs(os.path.dirname(os.path.expanduser(aws_config)))
+            with open(os.path.expanduser(aws_config), "w") as config_file:
+                config_file.write("[default]\n")
+                config_file.write("region = us-east-1\n")
+                config_file.write("output = text\n")
 
 
 @click.command()
@@ -195,24 +229,29 @@ def update_aws_config(
 
 
 def main(update, aws_config, sso_start_url, sso_region, region):
+    if not os.path.exists(os.path.expanduser(aws_config)): update=True
     if update:
         if not sso_start_url:
-            raise click.ClickException("No --sso_start_url specified")
+            raise click.ClickException("Updating aws config. No --sso_start_url specified")
+        check_aws_config(aws_config)
         print(aws_config, sso_start_url, sso_region, region)
         update_aws_config(aws_config, sso_start_url, sso_region, region)
     accounts = read_aws_config()
     accounts_formatted = [
         (account["sso_account_id"], account["profile_name"], account["sso_role_name"])
-        for account in accounts.values()
+        for account in accounts
     ]
     account_role = choose_account_role(accounts_formatted)
     account_name, account_id, role_name = account_role["account_name"], account_role["account_id"], account_role["role_name"]
     print(f"profile_name: {account_name}")
     print(f"account_id:   {account_id}")
     print(f"role_name:    {role_name}")
+
+    # get profile config from accounts list of dicts with profiles
+    login_account = [account for account in accounts if account["profile_name"] == account_name]
     session = login(
-        start_url=accounts[account_name]["sso_start_url"],
-        sso_region=accounts[account_name]["sso_region"],
+        start_url=login_account[0]["sso_start_url"],
+        sso_region=login_account[0]["sso_region"],
     )
     role_credentials = get_role_credentials(
         accessToken=session["accessToken"], account_id=account_id, role_name=role_name
