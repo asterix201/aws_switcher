@@ -12,10 +12,18 @@ import (
 )
 
 var rootCmd = &cobra.Command{
-	Use:   "aws-switcher",
+	Use:   "aws-switcher [account-id role-name]",
 	Short: "AWS SSO credential switcher",
-	Long:  "A tool to switch between AWS SSO accounts and update credentials",
-	Run:   runRoot,
+	Long: `A tool to switch between AWS SSO accounts and update credentials.
+
+Run without arguments for interactive selection, or pass an account ID and a
+role name to switch directly without the picker (useful for automation), e.g.:
+
+  aws-switcher 058264159440 psc-read-only-secret-perm-set
+
+The SSO browser confirmation / MFA still applies in direct mode.`,
+	Args: cobra.MaximumNArgs(2),
+	Run:  runRoot,
 }
 
 var (
@@ -41,53 +49,160 @@ func runRoot(cmd *cobra.Command, args []string) {
 		os.Exit(1)
 	}
 
-	// If update flag is set or no accounts saved, fetch from SSO
-	if update || len(cfg.Accounts) == 0 {
-		if startURL == "" {
-			startURL = cfg.StartURL
-		}
-		if startURL == "" {
-			fmt.Fprintf(os.Stderr, "SSO start URL is required. Use --start-url flag or save in config\n")
+	// Resolve effective SSO settings: an explicit flag wins, otherwise fall back
+	// to the saved config.
+	if !cmd.Flags().Changed("start-url") && cfg.StartURL != "" {
+		startURL = cfg.StartURL
+	}
+	if !cmd.Flags().Changed("sso-region") && cfg.SSORegion != "" {
+		ssoRegion = cfg.SSORegion
+	}
+
+	// Explicit update request: fetch and persist the account list, then exit.
+	if update {
+		if err := updateAccounts(cfg, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
+		return
+	}
 
-		fmt.Println("Fetching available accounts from SSO...")
-		accounts, err := aws.FetchAccounts(startURL, ssoRegion)
+	// Direct (non-interactive) mode: account ID + role name passed as args.
+	if len(args) == 2 {
+		// Warm cache: validate the pair up front so an unavailable account/role
+		// fails before we ever open the browser.
+		if len(cfg.Accounts) > 0 {
+			account, err := resolveAccount(cfg, args[0], args[1])
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "%v\n", err)
+				os.Exit(1)
+			}
+			switchToAccount(cfg, nil, account)
+			return
+		}
+
+		// Cold cache: authenticate once, then reuse the same session to fetch the
+		// account list and to request credentials (single browser confirmation).
+		session, err := login()
 		if err != nil {
-			fmt.Fprintf(os.Stderr, "Error fetching accounts: %v\n", err)
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
-
-		cfg.StartURL = startURL
-		cfg.SSORegion = ssoRegion
-		cfg.Accounts = accounts
-
-		if err := config.Save(cfg); err != nil {
-			fmt.Fprintf(os.Stderr, "Error saving config: %v\n", err)
+		if err := updateAccounts(cfg, session); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
 			os.Exit(1)
 		}
-
-		fmt.Printf("Successfully updated %d accounts\n", len(accounts))
+		account, err := resolveAccount(cfg, args[0], args[1])
+		if err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+		switchToAccount(cfg, session, account)
 		return
 	}
+	if len(args) == 1 {
+		fmt.Fprintf(os.Stderr, "Both account ID and role name are required for direct mode, e.g.:\n  aws-switcher 058264159440 psc-read-only-secret-perm-set\n")
+		os.Exit(1)
+	}
 
-	// Interactive account selection
+	// No accounts cached yet: fetch them first.
 	if len(cfg.Accounts) == 0 {
-		fmt.Println("No accounts found. Run with --update flag to fetch accounts from SSO.")
+		if err := updateAccounts(cfg, nil); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
 		return
 	}
 
+	// Interactive account selection.
 	selectedAccount, err := ui.SelectAccount(cfg.Accounts)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error selecting account: %v\n", err)
 		os.Exit(1)
 	}
 
-	fmt.Printf("Selected: %s (%s) - %s\n", selectedAccount.Name, selectedAccount.ID, selectedAccount.RoleName)
+	switchToAccount(cfg, nil, selectedAccount)
+}
 
-	// Login and get credentials
+// login authenticates with AWS SSO and returns a session whose access token is
+// reused across calls, so the browser confirmation happens only once.
+func login() (*aws.Session, error) {
+	if startURL == "" {
+		return nil, fmt.Errorf("SSO start URL is required. Use --start-url flag or save in config")
+	}
+
 	fmt.Println("Logging in to AWS SSO...")
-	creds, err := aws.GetCredentials(cfg.StartURL, cfg.SSORegion, selectedAccount.ID, selectedAccount.RoleName)
+	session, err := aws.Login(startURL, ssoRegion)
+	if err != nil {
+		return nil, fmt.Errorf("error logging in: %w", err)
+	}
+	return session, nil
+}
+
+// updateAccounts fetches the available accounts from SSO and persists them to
+// the config file. When session is nil it authenticates first.
+func updateAccounts(cfg *config.Config, session *aws.Session) error {
+	if session == nil {
+		var err error
+		if session, err = login(); err != nil {
+			return err
+		}
+	}
+
+	fmt.Println("Fetching available accounts from SSO...")
+	accounts, err := session.FetchAccounts()
+	if err != nil {
+		return fmt.Errorf("error fetching accounts: %w", err)
+	}
+
+	cfg.StartURL = startURL
+	cfg.SSORegion = ssoRegion
+	cfg.Accounts = accounts
+
+	if err := config.Save(cfg); err != nil {
+		return fmt.Errorf("error saving config: %w", err)
+	}
+
+	fmt.Printf("Successfully updated %d accounts\n", len(accounts))
+	return nil
+}
+
+// resolveAccount looks up the requested account ID / role name in the cached
+// account list. When the list is populated but the pair is missing, it returns
+// an error so we fail fast before triggering the browser flow. When no accounts
+// are cached yet, it falls back to the provided values and lets SSO validate
+// them during the credential request.
+func resolveAccount(cfg *config.Config, accountID, roleName string) (*config.Account, error) {
+	for i := range cfg.Accounts {
+		if cfg.Accounts[i].ID == accountID && cfg.Accounts[i].RoleName == roleName {
+			return &cfg.Accounts[i], nil
+		}
+	}
+
+	if len(cfg.Accounts) > 0 {
+		return nil, fmt.Errorf("account %q with role %q is not available; run with --update to refresh the account list", accountID, roleName)
+	}
+
+	// Nothing cached to validate against; SSO will reject it if it is not accessible.
+	return &config.Account{ID: accountID, Name: accountID, RoleName: roleName}, nil
+}
+
+// switchToAccount writes temporary credentials for the given account/role. When
+// session is nil it authenticates first; otherwise it reuses the provided
+// session so the browser flow is not repeated.
+func switchToAccount(cfg *config.Config, session *aws.Session, account *config.Account) {
+	fmt.Printf("Selected: %s (%s) - %s\n", account.Name, account.ID, account.RoleName)
+
+	if session == nil {
+		var err error
+		if session, err = login(); err != nil {
+			fmt.Fprintf(os.Stderr, "%v\n", err)
+			os.Exit(1)
+		}
+	}
+
+	// Get credentials
+	creds, err := session.GetCredentials(account.ID, account.RoleName)
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Error getting credentials: %v\n", err)
 		os.Exit(1)

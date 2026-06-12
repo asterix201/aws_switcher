@@ -27,8 +27,17 @@ type Credentials struct {
 	Expiration      time.Time
 }
 
-// FetchAccounts fetches available accounts from AWS SSO
-func FetchAccounts(startURL, ssoRegion string) ([]config.Account, error) {
+// Session is an authenticated AWS SSO session. The access token is obtained
+// once via the OIDC device flow (a single browser confirmation) and reused for
+// subsequent SSO API calls.
+type Session struct {
+	cfg         aws.Config
+	accessToken string
+}
+
+// Login performs the AWS SSO OIDC device authorization flow and returns a
+// session whose token can be reused for multiple SSO calls.
+func Login(startURL, ssoRegion string) (*Session, error) {
 	ctx := context.Background()
 
 	// Create AWS config
@@ -43,12 +52,17 @@ func FetchAccounts(startURL, ssoRegion string) ([]config.Account, error) {
 		return nil, fmt.Errorf("failed to get access token: %w", err)
 	}
 
-	// Create SSO client
-	ssoClient := sso.NewFromConfig(cfg)
+	return &Session{cfg: cfg, accessToken: accessToken}, nil
+}
+
+// FetchAccounts lists the accounts and roles available to the session.
+func (s *Session) FetchAccounts() ([]config.Account, error) {
+	ctx := context.Background()
+	ssoClient := sso.NewFromConfig(s.cfg)
 
 	// List accounts
 	accountsResp, err := ssoClient.ListAccounts(ctx, &sso.ListAccountsInput{
-		AccessToken: aws.String(accessToken),
+		AccessToken: aws.String(s.accessToken),
 	})
 	if err != nil {
 		return nil, fmt.Errorf("failed to list accounts: %w", err)
@@ -58,7 +72,7 @@ func FetchAccounts(startURL, ssoRegion string) ([]config.Account, error) {
 	for _, account := range accountsResp.AccountList {
 		// List roles for each account
 		rolesResp, err := ssoClient.ListAccountRoles(ctx, &sso.ListAccountRolesInput{
-			AccessToken: aws.String(accessToken),
+			AccessToken: aws.String(s.accessToken),
 			AccountId:   account.AccountId,
 		})
 		if err != nil {
@@ -77,28 +91,14 @@ func FetchAccounts(startURL, ssoRegion string) ([]config.Account, error) {
 	return accounts, nil
 }
 
-// GetCredentials gets temporary credentials for the specified account and role
-func GetCredentials(startURL, ssoRegion, accountID, roleName string) (*Credentials, error) {
+// GetCredentials gets temporary credentials for the specified account and role.
+func (s *Session) GetCredentials(accountID, roleName string) (*Credentials, error) {
 	ctx := context.Background()
-
-	// Create AWS config
-	cfg, err := awsconfig.LoadDefaultConfig(ctx, awsconfig.WithRegion(ssoRegion))
-	if err != nil {
-		return nil, fmt.Errorf("failed to load AWS config: %w", err)
-	}
-
-	// Get access token
-	accessToken, err := getAccessToken(ctx, cfg, startURL, ssoRegion)
-	if err != nil {
-		return nil, fmt.Errorf("failed to get access token: %w", err)
-	}
-
-	// Create SSO client
-	ssoClient := sso.NewFromConfig(cfg)
+	ssoClient := sso.NewFromConfig(s.cfg)
 
 	// Get role credentials
 	credsResp, err := ssoClient.GetRoleCredentials(ctx, &sso.GetRoleCredentialsInput{
-		AccessToken: aws.String(accessToken),
+		AccessToken: aws.String(s.accessToken),
 		AccountId:   aws.String(accountID),
 		RoleName:    aws.String(roleName),
 	})

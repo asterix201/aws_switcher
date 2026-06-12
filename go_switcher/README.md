@@ -51,6 +51,16 @@ Launch the interactive account selector:
 ./bin/aws-switcher
 ```
 
+### Switch directly (non-interactive)
+Pass an account ID and a role name to skip the picker — useful for scripts and
+automation:
+```bash
+./bin/aws-switcher 058264159440 psc-read-only-secret-perm-set
+```
+The pair is validated against the cached account list (run `--update` first to
+populate it); if it isn't available the command fails fast without opening the
+browser. The SSO browser confirmation / MFA still applies.
+
 ### Update account list
 Refresh the list of available accounts from SSO:
 ```bash

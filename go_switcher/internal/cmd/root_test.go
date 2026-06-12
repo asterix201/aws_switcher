@@ -3,6 +3,8 @@ package cmd
 import (
 	"testing"
 
+	"aws-switcher/internal/config"
+
 	"github.com/spf13/cobra"
 )
 
@@ -60,6 +62,42 @@ func TestCommandFlags(t *testing.T) {
 	if testStartURL != "" {
 		t.Errorf("Expected default start-url to be empty, got '%s'", testStartURL)
 	}
+}
+
+func TestResolveAccount(t *testing.T) {
+	cached := []config.Account{
+		{ID: "123456789012", Name: "Production", RoleName: "AdminRole"},
+		{ID: "058264159440", Name: "PSC", RoleName: "psc-read-only-secret-perm-set"},
+	}
+
+	t.Run("match returns the cached account", func(t *testing.T) {
+		cfg := &config.Config{Accounts: cached}
+		acc, err := resolveAccount(cfg, "058264159440", "psc-read-only-secret-perm-set")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if acc.Name != "PSC" {
+			t.Errorf("expected matched account name 'PSC', got %q", acc.Name)
+		}
+	})
+
+	t.Run("missing pair in non-empty list errors", func(t *testing.T) {
+		cfg := &config.Config{Accounts: cached}
+		if _, err := resolveAccount(cfg, "058264159440", "AdminRole"); err == nil {
+			t.Error("expected error for account/role pair not in the cached list")
+		}
+	})
+
+	t.Run("empty cache falls back to provided values", func(t *testing.T) {
+		cfg := &config.Config{}
+		acc, err := resolveAccount(cfg, "999999999999", "SomeRole")
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		if acc.ID != "999999999999" || acc.RoleName != "SomeRole" {
+			t.Errorf("expected fallback account from args, got %+v", acc)
+		}
+	})
 }
 
 func TestExecuteFunction(t *testing.T) {

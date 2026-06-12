@@ -32,7 +32,28 @@ Staging Account (123456789014) ReadOnlyRole
 
 Use arrow keys or type to search, press Enter to select.
 
-### 3. Updating Account List
+### 3. Direct Switch (Automation)
+
+When you already know the account ID and role name, pass them as arguments to
+skip the interactive picker:
+
+```bash
+./bin/aws-switcher 058264159440 psc-read-only-secret-perm-set
+```
+
+This is handy in scripts and CI helpers:
+
+```bash
+# Switch, then run AWS CLI in the same script
+./bin/aws-switcher 058264159440 psc-read-only-secret-perm-set
+aws s3 ls
+```
+
+The account/role pair is checked against the cached account list first, so an
+unavailable pair fails immediately without opening the browser. The SSO browser
+confirmation / MFA prompt still applies the same way as interactive mode.
+
+### 4. Updating Account List
 
 When new accounts are added to your SSO or roles change:
 
@@ -40,7 +61,7 @@ When new accounts are added to your SSO or roles change:
 ./bin/aws-switcher --update
 ```
 
-### 4. Using Different SSO Regions
+### 5. Using Different SSO Regions
 
 ```bash
 ./bin/aws-switcher --sso-region eu-west-1 --update
